@@ -7,7 +7,7 @@ name = "vibe-code-checker"
 version = "2.0.0"
 description = "Production-grade, zero-dependency instant bug engine for any codebase."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 authors = [
     { name = "Krishiv Joshi", email = "krishivjoshi219@gmail.com" }
 ]
@@ -23,7 +23,6 @@ keywords = [
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -35,9 +34,20 @@ requires-python = ">=3.10"
 
 [project.scripts]
 vcc = "check:main"
+check = "check:main"
 vibe-code-checker = "check:main"
 
 [project.urls]
 Homepage = "https://github.com/krishivjoshi219-collab/Vibe-Code-Checker"
 Repository = "https://github.com/krishivjoshi219-collab/Vibe-Code-Checker.git"
 Issues = "https://github.com/krishivjoshi219-collab/Vibe-Code-Checker/issues"
+
+[tool.setuptools]
+py-modules = ["check"]
+
+[tool.setuptools.packages.find]
+include = ["analyzers*", "autofix*", "reporters*"]
+exclude = ["fixes*", "repros*", "tests*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json"]

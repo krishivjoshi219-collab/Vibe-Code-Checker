@@ -2,10 +2,11 @@
 
 <div align="center">
 
+[![PyPI](https://img.shields.io/pypi/v/vibe-code-checker.svg)](https://pypi.org/project/vibe-code-checker/)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero%20(stdlib%20only)-brightgreen.svg)]()
-[![Tests](https://img.shields.io/badge/tests-20%20passed%20(10ms)-success.svg)]()
+[![Tests](https://img.shields.io/badge/tests-21%20passed%20(10ms)-success.svg)]()
 [![CI](https://img.shields.io/badge/CI-GitHub%20Actions-blueviolet.svg)]()
 [![Code Quality](https://img.shields.io/badge/quality-production--grade-orange.svg)]()
 
@@ -165,22 +166,36 @@ VCC categorizes all issues into three strict severity tiers:
 
 ## 💻 Installation & Quickstart
 
-### Option 1: Standalone CLI (Recommended)
+### Option 1: Install from PyPI (Recommended)
+Install globally or in your virtual environment:
+```bash
+pip install vibe-code-checker
+```
+Once installed, both `check` and `vcc` commands are immediately available in your terminal:
+```bash
+# Run with 'check'
+check --target .
+
+# Or run with 'vcc'
+vcc --target .
+```
+
+### Option 2: Standalone CLI (Zero Install)
 Clone and run immediately without installing anything:
 ```bash
 git clone git@github.com:krishivjoshi219-collab/Vibe-Code-Checker.git
 cd Vibe-Code-Checker
 
-# Scan any target project
+# Direct launcher script
+./check --target /path/to/project
+
+# Or python module
 python check.py --target /path/to/project
 ```
 
-### Option 2: Editable Install (`vcc` Command)
+### Option 3: Local Editable Install
 ```bash
 pip install -e .
-
-# Run globally from any directory
-vcc --target .
 ```
 
 ---

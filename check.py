@@ -29,12 +29,20 @@ from reporters import llm_report, terminal  # noqa: E402
 
 
 def load_rules(rules_path: str | None = None) -> dict:
-    path = rules_path or os.path.join(BASE_DIR, "rules.json")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    candidates = [
+        rules_path,
+        os.path.join(BASE_DIR, "rules.json"),
+        os.path.join(BASE_DIR, "analyzers", "rules.json"),
+        os.path.join(os.path.dirname(__file__), "analyzers", "rules.json"),
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c):
+            try:
+                with open(c, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+    return {}
 
 
 def run_analysis(

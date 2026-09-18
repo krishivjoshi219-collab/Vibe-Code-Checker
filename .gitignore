@@ -22,6 +22,11 @@ env/
 *.swp
 *.swo
 
+# Packaging and distribution
+dist/
+build/
+*.egg-info/
+
 # Output artifacts
 report.json
 report.md
@@ -29,3 +34,4 @@ repros/*
 !repros/.gitkeep
 fixes/*
 !fixes/.gitkeep
+
