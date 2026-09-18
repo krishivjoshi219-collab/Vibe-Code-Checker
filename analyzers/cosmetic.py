@@ -267,7 +267,8 @@ def analyze_cosmetic(path: str, rules: dict) -> list[dict]:
                     # Long function
                     end = getattr(node, "end_lineno", node.lineno)
                     fn_len = end - node.lineno
-                    if fn_len > max_fn_len:
+                    line_text = lines[node.lineno - 1] if node.lineno <= len(lines) else ""
+                    if fn_len > max_fn_len and "# noqa" not in line_text and "# vcc:ignore" not in line_text:
                         rule = "long-function"
                         findings.append({
                             "rule": rule,
@@ -285,7 +286,7 @@ def analyze_cosmetic(path: str, rules: dict) -> list[dict]:
 
                     # Many arguments
                     n_args = len(node.args.posonlyargs + node.args.args + node.args.kwonlyargs)
-                    if n_args > max_args:
+                    if n_args > max_args and "# noqa" not in line_text and "# vcc:ignore" not in line_text:
                         rule = "many-args"
                         findings.append({
                             "rule": rule,
@@ -338,25 +339,33 @@ def analyze_cosmetic(path: str, rules: dict) -> list[dict]:
                                 "fix_suggestion": f"Rename to `{COMMON_TYPOS[word]}`.",
                             })
 
-            # Check deep indentation / nesting
-            for idx, line in enumerate(lines, 1):
-                indent = len(line) - len(line.lstrip(" "))
-                if indent >= (max_nesting + 1) * 4 and line.strip() and not line.strip().startswith(("#", '"', "'")):
+            # Check deep control-flow nesting via AST
+            def check_nesting(node: ast.AST, depth: int = 0) -> bool:
+                is_block = isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With, ast.AsyncWith))
+                new_depth = depth + 1 if is_block else depth
+                if is_block and new_depth > max_nesting:
+                    lineno = getattr(node, "lineno", 1)
                     rule = "deep-nesting"
                     findings.append({
                         "rule": rule,
                         "severity": sev.get(rule, "P2"),
                         "category": categories.get(rule, "cosmetic"),
                         "file": path,
-                        "line": idx,
-                        "col": indent,
-                        "title": f"Deeply nested code ({indent // 4} levels deep, exceeds {max_nesting})",
-                        "description": "Deeply nested code significantly increases cognitive load and branch complexity.",
-                        "evidence": get_snippet(lines, idx, indent),
-                        "confidence": "low",
+                        "line": lineno,
+                        "col": getattr(node, "col_offset", 0),
+                        "title": f"Deeply nested control flow ({new_depth} levels deep, exceeds {max_nesting})",
+                        "description": "Deeply nested control flow significantly increases cognitive load and branch complexity.",
+                        "evidence": get_snippet(lines, lineno),
+                        "confidence": "high",
                         "fix_suggestion": "Invert conditions to return early (guard clauses) or extract helper functions.",
                     })
-                    break  # Flag at most one per file to avoid noise
+                    return True
+                for child in ast.iter_child_nodes(node):
+                    if check_nesting(child, new_depth):
+                        return True
+                return False
+
+            check_nesting(tree)
 
         except Exception:
             pass

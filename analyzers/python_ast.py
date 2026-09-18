@@ -577,6 +577,7 @@ class PythonASTVisitor(ast.NodeVisitor):
                 len(node.body) == 1
                 and isinstance(node.body[0], ast.Pass)
             )
+            re_raises = any(isinstance(s, ast.Raise) and s.exc is None for s in ast.walk(node))
             if is_silent:
                 self.add(
                     "silent-except-pass",
@@ -586,7 +587,7 @@ class PythonASTVisitor(ast.NodeVisitor):
                     fix_suggestion="Log the exception or re-raise with context.",
                     confidence="high",
                 )
-            else:
+            elif not re_raises:
                 self.add(
                     "broad-except",
                     node,
