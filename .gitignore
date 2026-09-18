@@ -35,3 +35,4 @@ repros/*
 fixes/*
 !fixes/.gitkeep
 
+.aider*

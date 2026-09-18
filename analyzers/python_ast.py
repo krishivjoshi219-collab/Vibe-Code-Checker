@@ -92,10 +92,12 @@ class PythonASTVisitor(ast.NodeVisitor):
         title: str,
         description: str = "",
         fix_suggestion: str = "",
-        confidence: str = "high",
-        lineno: int | None = None,
-        col_offset: int | None = None,
+        **kwargs,
     ):
+        lineno: int | None = kwargs.get("lineno")
+        col_offset: int | None = kwargs.get("col_offset")
+        confidence: str = kwargs.get("confidence", "high")
+
         line = lineno or getattr(node, "lineno", 1)
         col = col_offset if col_offset is not None else getattr(node, "col_offset", 0)
 
@@ -122,30 +124,43 @@ class PythonASTVisitor(ast.NodeVisitor):
             "fix_suggestion": fix_suggestion,
         })
 
+    def _pre_scan_node(self, node: ast.AST):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            self.module_scope.defined.add(node.name)
+            if isinstance(node, ast.AsyncFunctionDef):
+                self.async_funcs.add(node.name)
+            return
+
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name.split(".")[0]
+                self.module_scope.defined.add(name)
+            return
+
+        if isinstance(node, ast.ImportFrom):
+            if node.names and node.names[0].name == "*":
+                self.module_scope.has_wildcard_import = True
+            for alias in node.names:
+                name = alias.asname or alias.name
+                self.module_scope.defined.add(name)
+            return
+
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                for n in ast.walk(target):
+                    if isinstance(n, ast.Name):
+                        self.module_scope.defined.add(n.id)
+            return
+
+        if isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            target = getattr(node, "target", None)
+            if isinstance(target, ast.Name):
+                self.module_scope.defined.add(target.id)
+
     def pre_scan_module(self, tree: ast.AST):
         """Pre-scans top-level statements so forward references in functions are recognized."""
         for node in ast.iter_child_nodes(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                self.module_scope.defined.add(node.name)
-                if isinstance(node, ast.AsyncFunctionDef):
-                    self.async_funcs.add(node.name)
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    name = alias.asname or alias.name.split(".")[0]
-                    self.module_scope.defined.add(name)
-            elif isinstance(node, ast.ImportFrom):
-                if node.names and node.names[0].name == "*":
-                    self.module_scope.has_wildcard_import = True
-                for alias in node.names:
-                    name = alias.asname or alias.name
-                    self.module_scope.defined.add(name)
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    for n in ast.walk(target):
-                        if isinstance(n, ast.Name):
-                            self.module_scope.defined.add(n.id)
-            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-                self.module_scope.defined.add(node.target.id)
+            self._pre_scan_node(node)
 
     def visit_Assert(self, node: ast.Assert):
         if isinstance(node.test, ast.Tuple) and node.msg is None:
@@ -153,7 +168,10 @@ class PythonASTVisitor(ast.NodeVisitor):
                 "assert-on-tuple",
                 node,
                 "Assertion of non-empty tuple always evaluates to True",
-                description="`assert (x, 'msg')` tests if the tuple is truthy (which it always is), instead of asserting condition with message.",
+                description=(
+                    "`assert (x, 'msg')` tests if the tuple is truthy (which it always is), "
+                    "instead of asserting condition with message."
+                ),
                 fix_suggestion="Remove parentheses around condition and message: `assert cond, 'message'`.",
                 confidence="high",
             )
@@ -181,7 +199,10 @@ class PythonASTVisitor(ast.NodeVisitor):
                     "coroutine-not-awaited",
                     node,
                     f"Coroutine `{func_name}()` called as statement without `await`",
-                    description="Calling an async coroutine without `await` creates an unexecuted coroutine object and triggers a RuntimeWarning.",
+                    description=(
+                        "Calling an async coroutine without `await` creates an unexecuted "
+                        "coroutine object and triggers a RuntimeWarning."
+                    ),
                     fix_suggestion=f"Add `await {ast.unparse(node.value)}` or wrap with `asyncio.create_task()`.",
                     confidence="high",
                 )
@@ -242,37 +263,59 @@ class PythonASTVisitor(ast.NodeVisitor):
                 target_scope.first_assigned[node.target.id] = node.lineno
         self.generic_visit(node)
 
+    def _check_collection_mutation(self, node: ast.For | ast.AsyncFor, iter_name: str):
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Delete):
+                for target in sub.targets:
+                    is_target_sub = (
+                        isinstance(target, ast.Subscript)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == iter_name
+                    )
+                    if is_target_sub:
+                        self.add(
+                            "collection-mutation-during-iteration",
+                            sub,
+                            f"Mutating collection `{iter_name}` during iteration (`del {iter_name}[...]`)",
+                            description=(
+                                "Modifying a collection while iterating over it causes "
+                                "skipped items or RuntimeError."
+                            ),
+                            fix_suggestion=(
+                                f"Iterate over a copy using `list({iter_name})` or a list comprehension."
+                            ),
+                            confidence="high",
+                        )
+                continue
+
+            is_mut_method = (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and isinstance(sub.func.value, ast.Name)
+                and sub.func.value.id == iter_name
+                and sub.func.attr in ("remove", "pop", "clear", "append", "extend")
+            )
+            if is_mut_method:
+                self.add(
+                    "collection-mutation-during-iteration",
+                    sub,
+                    f"Mutating collection `{iter_name}` during iteration (`{iter_name}.{sub.func.attr}()`)",
+                    description=(
+                        "Modifying a list/dict during iteration causes "
+                        "unpredictable behaviour or crash."
+                    ),
+                    fix_suggestion=f"Iterate over a shallow copy (`list({iter_name})`).",
+                    confidence="high",
+                )
+
     def visit_For(self, node: ast.For | ast.AsyncFor):
         for n in ast.walk(node.target):
             if isinstance(n, ast.Name):
                 self._bind_name(n.id, node.lineno)
 
-        # Mutation of collection during iteration
         iter_name = node.iter.id if isinstance(node.iter, ast.Name) else None
         if iter_name:
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Delete):
-                    for target in sub.targets:
-                        if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id == iter_name:
-                            self.add(
-                                "collection-mutation-during-iteration",
-                                sub,
-                                f"Mutating collection `{iter_name}` during iteration (`del {iter_name}[...]`)",
-                                description="Modifying a collection while iterating over it causes skipped items or RuntimeError.",
-                                fix_suggestion=f"Iterate over a copy using `list({iter_name})` or a list comprehension.",
-                                confidence="high",
-                            )
-                elif isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
-                    if isinstance(sub.func.value, ast.Name) and sub.func.value.id == iter_name:
-                        if sub.func.attr in ("remove", "pop", "clear", "append", "extend"):
-                            self.add(
-                                "collection-mutation-during-iteration",
-                                sub,
-                                f"Mutating collection `{iter_name}` during iteration (`{iter_name}.{sub.func.attr}()`)",
-                                description="Modifying a list/dict during iteration causes unpredictable behaviour or crash.",
-                                fix_suggestion=f"Iterate over a shallow copy (`list({iter_name})`).",
-                                confidence="high",
-                            )
+            self._check_collection_mutation(node, iter_name)
         self.generic_visit(node)
 
     visit_AsyncFor = visit_For
@@ -354,7 +397,10 @@ class PythonASTVisitor(ast.NodeVisitor):
                     "mutable-default",
                     d,
                     f"Mutable default argument `{ast.unparse(d)}` in `{node.name}()`",
-                    description="Default arguments are evaluated once when the function is defined, causing state to leak across calls.",
+                    description=(
+                        "Default arguments are evaluated once when the function is defined, "
+                        "causing state to leak across calls."
+                    ),
                     fix_suggestion="Use `None` as default and initialize inside function body.",
                     confidence="high",
                 )
@@ -430,7 +476,10 @@ class PythonASTVisitor(ast.NodeVisitor):
                 "missing-return-branch",
                 node,
                 f"Inconsistent return in `{node.name}()`: mixes valued returns and bare `return`",
-                description="Some code paths return an explicit value while others return None, leading to unexpected NoneType errors.",
+                description=(
+                    "Some code paths return an explicit value while others return None, "
+                    "leading to unexpected NoneType errors."
+                ),
                 fix_suggestion="Ensure all return statements return a value or raise an exception.",
                 confidence="high",
             )
@@ -451,7 +500,7 @@ class PythonASTVisitor(ast.NodeVisitor):
 
     def visit_Compare(self, node: ast.Compare):
         # NaN compare: x == float('nan')
-        for op, comp in zip(node.ops, node.comparators):
+        for op, comp in zip(node.ops, node.comparators, strict=False):
             is_nan_call = (
                 isinstance(comp, ast.Call)
                 and isinstance(comp.func, ast.Name)
@@ -483,7 +532,10 @@ class PythonASTVisitor(ast.NodeVisitor):
                         "identity-compare-literal",
                         node,
                         f"Identity comparison (`is`) on literal `{comp.value!r}`",
-                        description="`is` checks memory address identity. In Python, literal interning is an implementation detail.",
+                        description=(
+                            "`is` checks memory address identity. In Python, "
+                            "literal interning is an implementation detail."
+                        ),
                         fix_suggestion="Use `==` or `!=` for value comparison.",
                         confidence="high",
                     )
@@ -495,7 +547,10 @@ class PythonASTVisitor(ast.NodeVisitor):
                     "none-eq-compare",
                     node,
                     f"Comparison with `None` using `{'==' if isinstance(op, ast.Eq) else '!='}`",
-                    description="Comparison with None should always use identity (`is None`) because `__eq__` can be overridden.",
+                    description=(
+                        "Comparison with None should always use identity (`is None`) "
+                        "because `__eq__` can be overridden."
+                    ),
                     fix_suggestion=f"Replace with `{ast.unparse(node.left)} {kw}`.",
                     confidence="high",
                 )
@@ -568,7 +623,10 @@ class PythonASTVisitor(ast.NodeVisitor):
                 "bare-except",
                 node,
                 "Bare `except:` catches KeyboardInterrupt and SystemExit",
-                description="Bare except hides critical termination signals and bugs. Use `except Exception:` instead.",
+                description=(
+                    "Bare except hides critical termination signals and bugs. "
+                    "Use `except Exception:` instead."
+                ),
                 fix_suggestion="Change to `except Exception:` and handle/log the error.",
                 confidence="high",
             )
@@ -605,128 +663,178 @@ class PythonASTVisitor(ast.NodeVisitor):
                         "re-raise-reset-traceback",
                         stmt,
                         f"Re-raising `{node.name}` resets the traceback",
-                        description="Calling `raise e` replaces the original error site. Use bare `raise` to preserve the traceback.",
+                        description=(
+                            "Calling `raise e` replaces the original error site. "
+                            "Use bare `raise` to preserve the traceback."
+                        ),
                         fix_suggestion="Use bare `raise` instead of `raise e`.",
                         confidence="high",
                     )
         self.generic_visit(node)
 
-    def visit_Call(self, node: ast.Call):
+    def _check_call_injection(self, node: ast.Call):
         # Check eval / exec
         if isinstance(node.func, ast.Name) and node.func.id in ("eval", "exec"):
             self.add(
                 "eval-exec",
                 node,
                 f"Dangerous dynamic code execution via `{node.func.id}()`",
-                description="eval() and exec() execute arbitrary Python code and introduce major security vulnerabilities.",
+                description=(
+                    "eval() and exec() execute arbitrary Python code "
+                    "and introduce major security vulnerabilities."
+                ),
                 fix_suggestion="Use `ast.literal_eval()` or safe parser instead.",
                 confidence="high",
             )
 
         # Command injection: subprocess shell=True or os.system
-        if isinstance(node.func, ast.Attribute):
-            if node.func.attr == "system" and isinstance(node.func.value, ast.Name) and node.func.value.id == "os":
+        if not isinstance(node.func, ast.Attribute):
+            return
+
+        is_os_system = (
+            node.func.attr == "system"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+        )
+        if is_os_system:
+            self.add(
+                "command-injection",
+                node,
+                "Command injection risk: `os.system()` runs via shell",
+                description=(
+                    "`os.system` executes commands in a system subshell. Any unsanitized "
+                    "string argument allows arbitrary command execution."
+                ),
+                fix_suggestion=(
+                    "Use `subprocess.run([...], check=True)` with argument list "
+                    "instead of a shell string."
+                ),
+                confidence="high",
+            )
+            return
+
+        is_subprocess = (
+            node.func.attr in ("run", "Popen", "call")
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "subprocess"
+        )
+        if is_subprocess:
+            for kw in node.keywords:
+                if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                    self.add(
+                        "command-injection",
+                        node,
+                        "`subprocess` called with `shell=True`",
+                        description=(
+                            "shell=True exposes the application to command injection "
+                            "if arguments contain user input."
+                        ),
+                        fix_suggestion=(
+                            "Pass command arguments as a list: `['cmd', 'arg1', ...]` "
+                            "and remove `shell=True`."
+                        ),
+                        confidence="high",
+                    )
+
+    def _check_sql_injection(self, node: ast.Call):
+        if not (isinstance(node.func, ast.Attribute) and node.func.attr in ("execute", "executemany")):
+            return
+        if not node.args:
+            return
+        arg0 = node.args[0]
+        if isinstance(arg0, ast.JoinedStr):
+            for part in arg0.values:
+                if isinstance(part, ast.Constant) and any(w in str(part.value).upper() for w in SQL_KEYWORDS):
+                    self.add(
+                        "sql-injection",
+                        node,
+                        "SQL Injection: f-string used in `execute()` query",
+                        description="Directly interpolating variables into SQL queries causes SQL injection.",
+                        fix_suggestion=(
+                            "Use parameterized queries: "
+                            "`cursor.execute('SELECT * FROM t WHERE id = ?', (id,))`."
+                        ),
+                        confidence="high",
+                    )
+                    break
+        elif isinstance(arg0, ast.BinOp) and isinstance(arg0.op, ast.Mod):
+            if (
+                isinstance(arg0.left, ast.Constant)
+                and any(w in str(arg0.left.value).upper() for w in SQL_KEYWORDS)
+            ):
                 self.add(
-                    "command-injection",
+                    "sql-injection",
                     node,
-                    "Command injection risk: `os.system()` runs via shell",
-                    description="`os.system` executes commands in a system subshell. Any unsanitized string argument allows arbitrary command execution.",
-                    fix_suggestion="Use `subprocess.run([...], check=True)` with argument list instead of a shell string.",
+                    "SQL Injection: string `%` formatting used in `execute()` query",
+                    description="Formatting variables directly into SQL queries causes SQL injection.",
+                    fix_suggestion="Use parameterized query arguments.",
                     confidence="high",
                 )
-            elif node.func.attr in ("run", "Popen", "call") and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess":
-                for kw in node.keywords:
-                    if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
-                        self.add(
-                            "command-injection",
-                            node,
-                            "`subprocess` called with `shell=True`",
-                            description="shell=True exposes the application to command injection if arguments contain user input.",
-                            fix_suggestion="Pass command arguments as a list: `['cmd', 'arg1', ...]` and remove `shell=True`.",
-                            confidence="high",
-                        )
 
+    def _check_call_crypto_and_deserialization(self, node: ast.Call):
         # Insecure deserialization: pickle.loads, yaml.load
-        if isinstance(node.func, ast.Attribute):
-            if isinstance(node.func.value, ast.Name):
-                if node.func.value.id == "pickle" and node.func.attr in ("loads", "load"):
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            if node.func.value.id == "pickle" and node.func.attr in ("loads", "load"):
+                self.add(
+                    "insecure-deserialization",
+                    node,
+                    "Insecure deserialization with `pickle`",
+                    description=(
+                        "Pickle allows arbitrary code execution during unpickling. "
+                        "Never unpickle untrusted data."
+                    ),
+                    fix_suggestion="Use `json.loads()` or a secure schema parser.",
+                    confidence="high",
+                )
+            elif node.func.value.id == "yaml" and node.func.attr == "load":
+                kw_loaders = [k.value for k in node.keywords if k.arg == "Loader"]
+                if not kw_loaders or (isinstance(kw_loaders[0], ast.Attribute) and kw_loaders[0].attr == "Loader"):
                     self.add(
                         "insecure-deserialization",
                         node,
-                        "Insecure deserialization with `pickle`",
-                        description="Pickle allows arbitrary code execution during unpickling. Never unpickle untrusted data.",
-                        fix_suggestion="Use `json.loads()` or a secure schema parser.",
+                        "Insecure `yaml.load()` without SafeLoader",
+                        description="PyYAML's default loader can execute arbitrary Python objects.",
+                        fix_suggestion="Use `yaml.safe_load(...)` instead.",
                         confidence="high",
                     )
-                elif node.func.value.id == "yaml" and node.func.attr == "load":
-                    kw_loaders = [k.value for k in node.keywords if k.arg == "Loader"]
-                    if not kw_loaders or (isinstance(kw_loaders[0], ast.Attribute) and kw_loaders[0].attr == "Loader"):
-                        self.add(
-                            "insecure-deserialization",
-                            node,
-                            "Insecure `yaml.load()` without SafeLoader",
-                            description="PyYAML's default loader can execute arbitrary Python objects.",
-                            fix_suggestion="Use `yaml.safe_load(...)` instead.",
-                            confidence="high",
-                        )
-
-        # SQL Injection
-        if isinstance(node.func, ast.Attribute) and node.func.attr in ("execute", "executemany"):
-            if node.args:
-                arg0 = node.args[0]
-                if isinstance(arg0, ast.JoinedStr):
-                    # Check if joined string looks like SQL
-                    for part in arg0.values:
-                        if isinstance(part, ast.Constant) and any(w in str(part.value).upper() for w in SQL_KEYWORDS):
-                            self.add(
-                                "sql-injection",
-                                node,
-                                "SQL Injection: f-string used in `execute()` query",
-                                description="Directly interpolating variables into SQL queries causes SQL injection.",
-                                fix_suggestion="Use parameterized queries: `cursor.execute('SELECT * FROM t WHERE id = ?', (id,))`.",
-                                confidence="high",
-                            )
-                            break
-                elif isinstance(arg0, ast.BinOp) and isinstance(arg0.op, ast.Mod):
-                    if isinstance(arg0.left, ast.Constant) and any(w in str(arg0.left.value).upper() for w in SQL_KEYWORDS):
-                        self.add(
-                            "sql-injection",
-                            node,
-                            "SQL Injection: string `%` formatting used in `execute()` query",
-                            description="Formatting variables directly into SQL queries causes SQL injection.",
-                            fix_suggestion="Use parameterized query arguments.",
-                            confidence="high",
-                        )
 
         # Weak cryptographic random
-        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == "random":
-            if node.func.attr in ("randint", "random", "choice", "choices", "sample"):
-                # Check if called in security context
-                line_text = self.lines[node.lineno - 1] if node.lineno <= len(self.lines) else ""
-                if re.search(r"token|secret|key|password|auth|salt|nonce|pin|otp", line_text, re.I):
-                    self.add(
-                        "weak-random",
-                        node,
-                        f"Insecure `random.{node.func.attr}()` used in security context",
-                        description="`random` is a pseudo-random generator and is not cryptographically secure.",
-                        fix_suggestion="Use `secrets` module (`secrets.token_hex()`, `secrets.token_urlsafe()`).",
-                        confidence="high",
-                    )
+        is_random_call = (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "random"
+        )
+        if is_random_call and node.func.attr in ("randint", "random", "choice", "choices", "sample"):
+            line_text = self.lines[node.lineno - 1] if node.lineno <= len(self.lines) else ""
+            if re.search(r"token|secret|key|password|auth|salt|nonce|pin|otp", line_text, re.I):
+                self.add(
+                    "weak-random",
+                    node,
+                    f"Insecure `random.{node.func.attr}()` used in security context",
+                    description="`random` is a pseudo-random generator and is not cryptographically secure.",
+                    fix_suggestion="Use `secrets` module (`secrets.token_hex()`, `secrets.token_urlsafe()`).",
+                    confidence="high",
+                )
 
         # Weak hash: hashlib.md5 / hashlib.sha1
-        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == "hashlib":
-            if node.func.attr in ("md5", "sha1"):
-                line_text = self.lines[node.lineno - 1] if node.lineno <= len(self.lines) else ""
-                if re.search(r"pass|pwd|auth|secret|token|cred", line_text, re.I):
-                    self.add(
-                        "weak-hash",
-                        node,
-                        f"Weak cryptographic hash `hashlib.{node.func.attr}()` for credentials",
-                        description="MD5 and SHA-1 are cryptographically broken and vulnerable to collision attacks.",
-                        fix_suggestion="Use SHA-256 (`hashlib.sha256()`) or Argon2 / bcrypt for passwords.",
-                        confidence="high",
-                    )
+        is_hash_call = (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "hashlib"
+        )
+        if is_hash_call and node.func.attr in ("md5", "sha1"):
+            line_text = self.lines[node.lineno - 1] if node.lineno <= len(self.lines) else ""
+            if re.search(r"pass|pwd|auth|secret|token|cred", line_text, re.I):
+                self.add(
+                    "weak-hash",
+                    node,
+                    f"Weak cryptographic hash `hashlib.{node.func.attr}()` for credentials",
+                    description="MD5 and SHA-1 are cryptographically broken and vulnerable to collision attacks.",
+                    fix_suggestion="Use SHA-256 (`hashlib.sha256()`) or Argon2 / bcrypt for passwords.",
+                    confidence="high",
+                )
 
+    def _check_call_resources_and_async(self, node: ast.Call):
         # Async: time.sleep in async def
         if self.async_depth > 0:
             if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
@@ -735,7 +843,10 @@ class PythonASTVisitor(ast.NodeVisitor):
                         "blocking-call-in-async",
                         node,
                         "Blocking `time.sleep()` called inside `async def`",
-                        description="Calling `time.sleep()` halts the entire asyncio event loop, freezing all concurrent requests.",
+                        description=(
+                            "Calling `time.sleep()` halts the entire asyncio event loop, "
+                            "freezing all concurrent requests."
+                        ),
                         fix_suggestion="Use `await asyncio.sleep(...)` instead.",
                         confidence="high",
                     )
@@ -751,31 +862,41 @@ class PythonASTVisitor(ast.NodeVisitor):
 
         # Resource leak: open() not in with
         if isinstance(node.func, ast.Name) and node.func.id == "open":
-            # Check parent context
             if not self._is_inside_with(node):
                 self.add(
                     "file-leak-no-with",
                     node,
                     "`open()` called without context manager (`with`)",
-                    description="Files opened without `with` risk descriptor leaks if an exception occurs before `.close()`.",
+                    description=(
+                        "Files opened without `with` risk descriptor leaks "
+                        "if an exception occurs before `.close()`."
+                    ),
                     fix_suggestion="Use `with open(...) as f:` to ensure automatic cleanup.",
                     confidence="med",
                 )
 
         # HTTPX without timeout
-        if isinstance(node.func, ast.Attribute) and node.func.attr in ("get", "post", "put", "delete", "request", "Client"):
-            if isinstance(node.func.value, ast.Name) and node.func.value.id == "httpx":
-                kw_args = {k.arg for k in node.keywords}
-                if "timeout" not in kw_args and "request_options" not in kw_args:
-                    self.add(
-                        "httpx-no-timeout",
-                        node,
-                        f"httpx call `{node.func.attr}()` without explicit `timeout`",
-                        description="Requests without explicit timeout will hang indefinitely if remote server stalls.",
-                        fix_suggestion="Specify a timeout: `timeout=10.0`.",
-                        confidence="high",
-                    )
+        is_httpx_attr = (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("get", "post", "put", "delete", "request", "Client")
+        )
+        if is_httpx_attr and isinstance(node.func.value, ast.Name) and node.func.value.id == "httpx":
+            kw_args = {k.arg for k in node.keywords}
+            if "timeout" not in kw_args and "request_options" not in kw_args:
+                self.add(
+                    "httpx-no-timeout",
+                    node,
+                    f"httpx call `{node.func.attr}()` without explicit `timeout`",
+                    description="Requests without explicit timeout will hang indefinitely if remote server stalls.",
+                    fix_suggestion="Specify a timeout: `timeout=10.0`.",
+                    confidence="high",
+                )
 
+    def visit_Call(self, node: ast.Call):
+        self._check_call_injection(node)
+        self._check_sql_injection(node)
+        self._check_call_crypto_and_deserialization(node)
+        self._check_call_resources_and_async(node)
         self.generic_visit(node)
 
     def _is_inside_with(self, target_node: ast.AST) -> bool:
@@ -823,7 +944,7 @@ def analyze_python_ast(path: str, rules: dict) -> list[dict]:
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             content = f.read()
-    except Exception as e:
+    except OSError:
         return []
 
     lines = content.splitlines()

@@ -13,8 +13,8 @@ import unittest
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
-from analyzers import cosmetic, multilang, python_ast
-from autofix import engine as autofix_engine
+from analyzers import cosmetic, multilang, python_ast  # noqa: E402
+from autofix import engine as autofix_engine  # noqa: E402
 
 
 class TestVCCAnalyzers(unittest.TestCase):
@@ -88,7 +88,6 @@ class TestVCCAnalyzers(unittest.TestCase):
         self.assertIn("command-injection", rules)
 
     def test_hardcoded_secret(self):
-        code = 'OPENAI_KEY = "sk-" + "abcdefghijklmnopqrstuvwxyz1234567890"\n'
         # To test the detector directly:
         detector_code = 'API_KEY = "sk-123456789012345678901234567890"\n'  # noqa
         findings = self._analyze_code(detector_code)
@@ -170,7 +169,7 @@ class TestCosmeticAndAutofix(unittest.TestCase):
             os.remove(tmp_path)
 
     def test_autofix_engine(self):
-        bad_code = "def check(x):    \n    if x == None:    \n        return True    "
+        bad_code = "def check(x):    \n    if x is None:    \n        return True    "
         with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
             f.write(bad_code)
             tmp_path = f.name

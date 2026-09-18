@@ -4,7 +4,6 @@ Safely fixes cosmetic, formatting, and simple mechanical code bugs without riski
 """
 from __future__ import annotations
 
-import os
 import re
 
 NONE_EQ_RE = re.compile(r"(\b\w+)\s*==\s*None\b")
@@ -18,7 +17,7 @@ def fix_file(path: str) -> list[str]:
     try:
         with open(path, "rb") as f:
             raw = f.read()
-    except Exception:
+    except OSError:
         return []
 
     fixes: list[str] = []
@@ -87,7 +86,7 @@ def fix_file(path: str) -> list[str]:
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
-        except Exception as e:
+        except OSError as e:
             return [f"Failed to write: {e}"]
 
     return fixes

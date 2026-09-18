@@ -21,14 +21,32 @@ def get_key() -> str:
 
 
 def _post(url: str, key: str, payload: dict, timeout: int = 60) -> dict:
-    req = urllib.request.Request(
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"Invalid URL scheme for endpoint: {url}")
+    req = urllib.request.Request(  # noqa: S310
         url,
         data=json.dumps(payload).encode(),
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310
         return json.loads(r.read().decode())
+
+
+def _extract_response_text(data: dict) -> str:
+    """Best-effort text extractor from varying response shapes."""
+    try:
+        chunks = [
+            c.get("text", "")
+            for item in data.get("output", [])
+            for c in item.get("content", [])
+            if c.get("type") in ("output_text", "text")
+        ]
+        if chunks:
+            return "\n".join(chunks)
+    except (KeyError, TypeError, AttributeError, ValueError):
+        pass
+    return json.dumps(data)[:4000]
 
 
 def complete(model: str, endpoint: str, kind: str, key: str, prompt: str) -> str:
@@ -36,19 +54,7 @@ def complete(model: str, endpoint: str, kind: str, key: str, prompt: str) -> str
         raise ValueError(f"Blocked non-free model: {model}")
     if kind == "responses":
         data = _post(endpoint, key, {"model": model, "input": prompt, "max_output_tokens": 1200})
-        # responses API shapes vary; extract best-effort text
-        try:
-            out = data.get("output", [])
-            chunks = []
-            for item in out:
-                for c in item.get("content", []):
-                    if c.get("type") in ("output_text", "text"):
-                        chunks.append(c.get("text", ""))
-            if chunks:
-                return "\n".join(chunks)
-            return json.dumps(data)[:4000]
-        except Exception:
-            return json.dumps(data)[:4000]
+        return _extract_response_text(data)
     data = _post(endpoint, key, {
         "model": model,
         "messages": [{"role": "user", "content": prompt[:6000]}],

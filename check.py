@@ -60,7 +60,7 @@ def run_analysis(
     def scan_single(fpath: str) -> list[dict]:
         try:
             return scan_file(fpath, rules)
-        except Exception:
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
             return []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -72,8 +72,8 @@ def run_analysis(
         try:
             ruff_findings = native_fast.run_ruff(target, rules)
             findings.extend(ruff_findings)
-        except Exception:
-            pass
+        except (OSError, ValueError):
+            ruff_findings = []
 
     # Deduplicate findings by (file, line, rule)
     seen = set()
@@ -88,31 +88,44 @@ def run_analysis(
     return unique_findings, len(files), duration
 
 
+def cmd_list_rules(rules: dict) -> None:
+    print(f"\n{terminal.BOLD}{terminal.CYAN}Supported Rules & Severity Taxonomy:{terminal.RESET}\n")
+    sev_map = rules.get("severity", {})
+    cat_map = rules.get("categories", {})
+
+    print(f"{'Rule ID':<35} {'Severity':<10} {'Category':<12}")
+    print("-" * 60)
+    for rule, sev in sorted(sev_map.items()):
+        cat = cat_map.get(rule, "other")
+        sev_color = terminal.SEV_COLORS.get(sev, terminal.WHITE)
+        print(f"{rule:<35} {sev_color}{sev:<10}{terminal.RESET} {cat:<12}")
+    print()
+
+
 def cmd_fix(target: str, rules: dict) -> int:
-    print(f"\n{terminal.BOLD}{terminal.CYAN}⚡ Running Safe Deterministic Auto-Fixer on:{terminal.RESET} {target}")
     files = walker.discover_files(target, rules)
-    result = autofix_engine.run_safe_autofix(files)
-
+    print(f"\n{terminal.BOLD}{terminal.CYAN}⚡ Running Safe Deterministic Auto-Fixer on:{terminal.RESET} {target}")
+    summary = autofix_engine.run_safe_autofix(files)
     print(f"Files inspected: {len(files)}")
-    print(f"Files modified:  {terminal.GREEN}{result['files_modified']}{terminal.RESET}")
-    print(f"Total fixes:     {terminal.GREEN}{result['total_fixes']}{terminal.RESET}\n")
+    print(f"Files modified:  {summary['files_modified']}")
+    print(f"Total fixes:     {summary['total_fixes']}\n")
 
-    for fpath, fix_list in result["details"].items():
-        rel = os.path.relpath(fpath, os.getcwd())
+    for fpath, fixes in summary["details"].items():
+        rel = os.path.relpath(fpath, target) if os.path.isdir(target) else os.path.basename(fpath)
         print(f"  {terminal.BOLD}{rel}{terminal.RESET}")
-        for fix_desc in fix_list:
-            print(f"    ✓ {terminal.GREEN}{fix_desc}{terminal.RESET}")
-
+        for fix_desc in fixes:
+            print(f"    {terminal.GREEN}✓{terminal.RESET} {fix_desc}")
+    print()
     return 0
 
 
-def cmd_autofix(args) -> int:
-    jp = os.path.join(BASE_DIR, "report.json")
-    if not os.path.exists(jp):
-        print("No report.json found. Please run analysis first: python check.py")
+def cmd_autofix(args: argparse.Namespace) -> int:
+    report_file = os.path.join(BASE_DIR, "report.json")
+    if not os.path.exists(report_file):
+        print(f"{terminal.RED}Error: report.json not found in {BASE_DIR}. Run scan first.{terminal.RESET}")
         return 1
 
-    with open(jp, "r", encoding="utf-8") as f:
+    with open(report_file, encoding="utf-8") as f:
         data = json.load(f)
 
     findings = data.get("findings", [])
@@ -122,7 +135,8 @@ def cmd_autofix(args) -> int:
 
     items = findings[: args.limit]
     print(f"\nFound {len(findings)} total findings. Processing up to {len(items)} (limit={args.limit}).")
-    print(f"{terminal.YELLOW}Note: AI auto-fix uses Zen FREE models. Never transmit confidential keys or data.{terminal.RESET}")
+    warn_msg = "Note: AI auto-fix uses Zen FREE models. Never transmit confidential keys or data."
+    print(f"{terminal.YELLOW}{warn_msg}{terminal.RESET}")
 
     if not gate.ask_yes_no("Launch AI auto-fix with Zen FREE model?"):
         print("Cancelled — no external calls made.")
@@ -143,11 +157,12 @@ def cmd_autofix(args) -> int:
     os.makedirs(fixes_dir, exist_ok=True)
 
     for b in items:
-        print(f"\n{terminal.BOLD}--- [{b.get('id', '?')}] {b.get('file')}:{b.get('line')} [{b.get('rule')}] ---{terminal.RESET}")
+        hdr = f"--- [{b.get('id', '?')}] {b.get('file')}:{b.get('line')} [{b.get('rule')}] ---"
+        print(f"\n{terminal.BOLD}{hdr}{terminal.RESET}")
         try:
             prompt = b.get("fix_prompt", "")
             response = zen_client.complete(model, endpoint, kind, key, prompt)
-        except Exception as e:
+        except (OSError, ValueError, KeyError) as e:
             print(f"Call failed: {e}")
             continue
 
@@ -166,41 +181,66 @@ def cmd_autofix(args) -> int:
     return 0
 
 
-def cmd_list_rules(rules: dict):
-    print(f"\n{terminal.BOLD}{terminal.CYAN}Supported Rules & Severity Taxonomy:{terminal.RESET}\n")
-    sev_map = rules.get("severity", {})
-    cat_map = rules.get("categories", {})
-
-    print(f"{'Rule ID':<35} {'Severity':<10} {'Category':<12}")
-    print("-" * 60)
-    for rule, sev in sorted(sev_map.items()):
-        cat = cat_map.get(rule, "other")
-        sev_color = terminal.SEV_COLORS.get(sev, terminal.WHITE)
-        print(f"{rule:<35} {sev_color}{sev:<10}{terminal.RESET} {cat:<12}")
-    print()
-
-
-def main(argv: list[str] | None = None) -> int:
+def build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Vibe Code Checker (VCC) — Production-Grade Instant Bug Engine",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--version", "-v", action="version", version="vibe-code-checker 2.0.0")
+    parser.add_argument("--version", "-v", action="version", version="vibe-code-checker 2.0.1")
     parser.add_argument("target_pos", nargs="?", default=None, help="Target directory or file to scan (default: .)")
     parser.add_argument("--target", "-t", default=None, help="Target directory or file to scan")
-    parser.add_argument("--severity", "-s", choices=["P0", "P1", "P2"], default=None, help="Minimum severity to report")
-    parser.add_argument("--category", "-c", default=None, help="Filter by category (logic, security, async, resource, cosmetic, syntax, config)")
-    parser.add_argument("--fail-on", choices=["P0", "P1", "P2", "none"], default="P0", help="Exit with 1 if issues >= severity are found (default: P0)")
-    parser.add_argument("--format", "-f", choices=["pretty", "compact", "json"], default="pretty", help="Terminal output format")
-    parser.add_argument("--fix", action="store_true", help="Apply safe deterministic fixes to cosmetic/mechanical bugs")
+    parser.add_argument("--severity", "-s", choices=["P0", "P1", "P2"], default=None, help="Minimum severity")
+    parser.add_argument(
+        "--category", "-c", default=None,
+        help="Filter by category (logic, security, async, resource, cosmetic, syntax, config)",
+    )
+    parser.add_argument(
+        "--fail-on", choices=["P0", "P1", "P2", "none"], default="P0",
+        help="Exit with 1 if issues >= severity are found (default: P0)",
+    )
+    parser.add_argument(
+        "--format", "-f", choices=["pretty", "compact", "json"], default="pretty",
+        help="Terminal output format",
+    )
+    parser.add_argument("--fix", action="store_true", help="Apply safe deterministic fixes")
     parser.add_argument("--autofix", action="store_true", help="Launch interactive AI autofix using Zen FREE models")
     parser.add_argument("--model", default=None, help="Zen FREE model ID for --autofix")
     parser.add_argument("--limit", type=int, default=5, help="Max items to process in --autofix")
     parser.add_argument("--workers", "-w", type=int, default=None, help="Number of parallel worker threads")
     parser.add_argument("--no-ruff", action="store_true", help="Disable native Ruff accelerator even if available")
     parser.add_argument("--rule-list", action="store_true", help="Display all supported rules and exit")
-    parser.add_argument("--output-dir", default=None, help="Directory to save report.json and report.md (default: target directory)")
+    parser.add_argument(
+        "--output-dir", default=None,
+        help="Directory to save report.json and report.md (default: target directory)",
+    )
+    return parser
 
+
+def render_cli_output(
+    fmt: str,
+    target: str,
+    file_count: int,
+    duration_s: float,
+    filtered: list[dict],
+    output_dir: str,
+) -> None:
+    if fmt == "pretty":
+        for f in filtered:
+            terminal.render_card(f)
+        terminal.render_summary(target, file_count, duration_s, filtered)
+        print(f"📄 Reports generated in: {terminal.BOLD}{output_dir}{terminal.RESET}")
+        print(f"   • {terminal.CYAN}report.json{terminal.RESET}  (Machine-readable AST diagnostics & fix prompts)")
+        print(f"   • {terminal.CYAN}report.md{terminal.RESET}    (Executive markdown report with full details)\n")
+        print(f"💡 Run {terminal.BOLD}check --fix{terminal.RESET} to auto-resolve cosmetic/mechanical issues.")
+        print(f"🤖 Run {terminal.BOLD}check --autofix{terminal.RESET} for AI-assisted fixes.\n")
+    elif fmt == "compact":
+        terminal.render_compact(filtered)
+    elif fmt == "json":
+        print(json.dumps({"target": target, "count": len(filtered), "findings": filtered}, indent=2))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_cli_parser()
     args = parser.parse_args(argv)
     rules = load_rules()
 
@@ -210,7 +250,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Resolve target path (treat redundant 'check' keyword as self-alias)
     raw_target = args.target or args.target_pos or "."
-    if raw_target == "check" and (not os.path.exists("check") or os.path.abspath(raw_target) == os.path.join(BASE_DIR, "check")):
+    is_self = raw_target == "check" and (
+        not os.path.exists("check") or os.path.abspath(raw_target) == os.path.join(BASE_DIR, "check")
+    )
+    if is_self:
         raw_target = "."
     target = os.path.abspath(raw_target)
 
@@ -241,14 +284,13 @@ def main(argv: list[str] | None = None) -> int:
         cat_lower = args.category.lower()
         filtered = [f for f in filtered if f.get("category", "").lower() == cat_lower]
 
-    # Save reports to target directory (or current directory if target is not writable)
     output_dir = args.output_dir or (target if os.path.isdir(target) else os.path.dirname(target))
     try:
         os.makedirs(output_dir, exist_ok=True)
-    except Exception:
+    except OSError:
         output_dir = os.getcwd()
 
-    jp, mp = llm_report.write_reports(
+    llm_report.write_reports(
         base_dir=output_dir,
         target=target,
         file_count=file_count,
@@ -256,22 +298,8 @@ def main(argv: list[str] | None = None) -> int:
         findings=filtered,
     )
 
-    # Render output
-    if args.format == "pretty":
-        for f in filtered:
-            terminal.render_card(f)
-        terminal.render_summary(target, file_count, duration_s, filtered)
-        print(f"📄 Reports generated in: {terminal.BOLD}{output_dir}{terminal.RESET}")
-        print(f"   • {terminal.CYAN}report.json{terminal.RESET}  (Machine-readable AST diagnostics & fix prompts)")
-        print(f"   • {terminal.CYAN}report.md{terminal.RESET}    (Executive markdown report with full details)\n")
-        print(f"💡 Run {terminal.BOLD}check --fix{terminal.RESET} to auto-resolve cosmetic/mechanical issues.")
-        print(f"🤖 Run {terminal.BOLD}check --autofix{terminal.RESET} for AI-assisted fixes.\n")
-    elif args.format == "compact":
-        terminal.render_compact(filtered)
-    elif args.format == "json":
-        print(json.dumps({"target": target, "count": len(filtered), "findings": filtered}, indent=2))
+    render_cli_output(args.format, target, file_count, duration_s, filtered, output_dir)
 
-    # Exit code determination
     if args.fail_on != "none":
         sev_rank = {"P0": 0, "P1": 1, "P2": 2}
         fail_rank = sev_rank[args.fail_on]

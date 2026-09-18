@@ -38,10 +38,14 @@ def run_ruff(target: str, rules: dict) -> list[dict]:
             "--output-format", "json",
             "--no-cache",
             "--select", "E,F,W,B,S,ASYNC",
+            "--line-length", "120",
+            "--ignore", "E501",
             "--exclude", ",".join(skip_dirs),
             target,
         ]
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+        proc = subprocess.run(  # noqa: S603
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15
+        )
         raw_output = proc.stdout.strip()
         if not raw_output:
             return []
@@ -78,10 +82,9 @@ def run_ruff(target: str, rules: dict) -> list[dict]:
                 "description": f"Ruff reported: {msg}",
                 "evidence": f"Line {row}, Col {col}: {msg}",
                 "confidence": "high",
-                "fix_suggestion": item.get("fix", {}).get("message", "Review and fix lint warning."),
+                "fix_suggestion": (item.get("fix") or {}).get("message", "Review and fix lint warning."),
             })
-
-    except Exception:
-        pass
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError, KeyError):
+        return []
 
     return findings
