@@ -185,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Vibe Code Checker (VCC) — Production-Grade Instant Bug Engine",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--version", "-v", action="version", version="vibe-code-checker 2.0.0")
     parser.add_argument("target_pos", nargs="?", default=None, help="Target directory or file to scan (default: .)")
     parser.add_argument("--target", "-t", default=None, help="Target directory or file to scan")
     parser.add_argument("--severity", "-s", choices=["P0", "P1", "P2"], default=None, help="Minimum severity to report")
@@ -198,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workers", "-w", type=int, default=None, help="Number of parallel worker threads")
     parser.add_argument("--no-ruff", action="store_true", help="Disable native Ruff accelerator even if available")
     parser.add_argument("--rule-list", action="store_true", help="Display all supported rules and exit")
-    parser.add_argument("--output-dir", default=BASE_DIR, help="Directory to save report.json and report.md")
+    parser.add_argument("--output-dir", default=None, help="Directory to save report.json and report.md (default: target directory)")
 
     args = parser.parse_args(argv)
     rules = load_rules()
@@ -240,9 +241,15 @@ def main(argv: list[str] | None = None) -> int:
         cat_lower = args.category.lower()
         filtered = [f for f in filtered if f.get("category", "").lower() == cat_lower]
 
-    # Save reports
+    # Save reports to target directory (or current directory if target is not writable)
+    output_dir = args.output_dir or (target if os.path.isdir(target) else os.path.dirname(target))
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except Exception:
+        output_dir = os.getcwd()
+
     jp, mp = llm_report.write_reports(
-        base_dir=args.output_dir,
+        base_dir=output_dir,
         target=target,
         file_count=file_count,
         duration_s=duration_s,
@@ -254,11 +261,11 @@ def main(argv: list[str] | None = None) -> int:
         for f in filtered:
             terminal.render_card(f)
         terminal.render_summary(target, file_count, duration_s, filtered)
-        print(f"📄 Reports generated in: {terminal.BOLD}{args.output_dir}{terminal.RESET}")
+        print(f"📄 Reports generated in: {terminal.BOLD}{output_dir}{terminal.RESET}")
         print(f"   • {terminal.CYAN}report.json{terminal.RESET}  (Machine-readable AST diagnostics & fix prompts)")
         print(f"   • {terminal.CYAN}report.md{terminal.RESET}    (Executive markdown report with full details)\n")
-        print(f"💡 Run {terminal.BOLD}python check.py --fix{terminal.RESET} to auto-resolve cosmetic/mechanical issues.")
-        print(f"🤖 Run {terminal.BOLD}python check.py --autofix{terminal.RESET} for AI-assisted fixes.\n")
+        print(f"💡 Run {terminal.BOLD}check --fix{terminal.RESET} to auto-resolve cosmetic/mechanical issues.")
+        print(f"🤖 Run {terminal.BOLD}check --autofix{terminal.RESET} for AI-assisted fixes.\n")
     elif args.format == "compact":
         terminal.render_compact(filtered)
     elif args.format == "json":
