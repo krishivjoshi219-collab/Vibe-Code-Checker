@@ -30,7 +30,7 @@ def run_ruff(target: str, rules: dict) -> list[dict]:
         skip_dirs = [
             ".git", "__pycache__", ".pytest_cache", ".ruff_cache",
             ".venv", "venv", "env", ".env", "node_modules", "dist",
-            "build", ".mypy_cache", "repros", "fixes"
+            "build", ".mypy_cache", "repros", "fixes", "vibe code checker"
         ]
         cmd = [
             RUFF_BIN,

@@ -21,6 +21,7 @@ DEFAULT_SKIP_DIRS = {
     "site-packages",
     "repros",
     "fixes",
+    "vibe code checker",
     ".idea",
     ".vscode",
 }

@@ -176,7 +176,8 @@
       ".eggs",
       "site-packages",
       "repros",
-      "fixes"
+      "fixes",
+      "vibe code checker"
     ],
     "files": [
       "report.json",

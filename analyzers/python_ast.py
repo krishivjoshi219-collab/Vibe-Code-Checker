@@ -763,13 +763,13 @@ class PythonASTVisitor(ast.NodeVisitor):
 
         # HTTPX without timeout
         if isinstance(node.func, ast.Attribute) and node.func.attr in ("get", "post", "put", "delete", "request", "Client"):
-            if isinstance(node.func.value, ast.Name) and node.func.value.id in ("httpx", "client"):
+            if isinstance(node.func.value, ast.Name) and node.func.value.id == "httpx":
                 kw_args = {k.arg for k in node.keywords}
                 if "timeout" not in kw_args and "request_options" not in kw_args:
                     self.add(
                         "httpx-no-timeout",
                         node,
-                        f"httpx call `{node.func.attr}()` without `timeout`",
+                        f"httpx call `{node.func.attr}()` without explicit `timeout`",
                         description="Requests without explicit timeout will hang indefinitely if remote server stalls.",
                         fix_suggestion="Specify a timeout: `timeout=10.0`.",
                         confidence="high",
