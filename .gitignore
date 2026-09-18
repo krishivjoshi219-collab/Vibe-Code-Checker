@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches and testing
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+
+# Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Output artifacts
+report.json
+report.md
+repros/*
+!repros/.gitkeep
+fixes/*
+!fixes/.gitkeep
