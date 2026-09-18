@@ -1,0 +1,8 @@
+- id: vibe-code-checker
+  name: Vibe Code Checker (VCC)
+  description: Instant, production-grade bug engine with zero external dependencies.
+  entry: python check.py
+  language: python
+  types: [text]
+  pass_filenames: false
+  always_run: true

@@ -185,6 +185,15 @@ class TestCosmeticAndAutofix(unittest.TestCase):
         finally:
             os.remove(tmp_path)
 
+    def test_cli_main_alias(self):
+        import check
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_file = os.path.join(tmp_dir, "good.py")
+            with open(test_file, "w") as f:
+                f.write("def add(a: int, b: int) -> int:\n    return a + b\n")
+            exit_code = check.main(["check", "--target", tmp_dir, "--fail-on", "P0", "--format", "compact"])
+            self.assertEqual(exit_code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

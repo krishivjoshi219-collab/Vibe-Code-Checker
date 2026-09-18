@@ -172,7 +172,7 @@ def cmd_list_rules(rules: dict):
     print()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Vibe Code Checker (VCC) — Production-Grade Instant Bug Engine",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -192,15 +192,17 @@ def main() -> int:
     parser.add_argument("--rule-list", action="store_true", help="Display all supported rules and exit")
     parser.add_argument("--output-dir", default=BASE_DIR, help="Directory to save report.json and report.md")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     rules = load_rules()
 
     if args.rule_list:
         cmd_list_rules(rules)
         return 0
 
-    # Resolve target path
+    # Resolve target path (treat redundant 'check' keyword as self-alias)
     raw_target = args.target or args.target_pos or "."
+    if raw_target == "check" and (not os.path.exists("check") or os.path.abspath(raw_target) == os.path.join(BASE_DIR, "check")):
+        raw_target = "."
     target = os.path.abspath(raw_target)
 
     if args.fix:
